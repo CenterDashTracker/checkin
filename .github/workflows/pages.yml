@@ -27,7 +27,7 @@ jobs:
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
         run: |
           mkdir site
-          sed -e "s|SECRET_SUPABASE_URLL|$SUPABASE_URL|" \
+          sed -e "s|SECRET_SUPABASE_URL|$SUPABASE_URL|" \
               -e "s|SECRET_SUPABASE_KEY|$SUPABASE_ANON_KEY|" \
               checkin.html > site/index.html
           cp scanner-test.html site/ 2>/dev/null || true
