@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scanner Check-in</title>
+<style>
+  :root { color-scheme: light dark; --bg:#f6f7f9; --panel:#fff; --fg:#1b2130; --muted:#5e6778; --line:#d8dce3;
+          --in:#0f7b4f; --out:#2557c9; --done:#667085; --bad:#b42318; --warn:#9a6200; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#121419; --panel:#1b1f27; --fg:#e8ebf0; --muted:#98a2b3; --line:#2e3542;
+          --in:#4cc38a; --out:#7aa2ff; --done:#98a2b3; --bad:#ff7b72; --warn:#e0b04c; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.5 system-ui,"Segoe UI",Roboto,sans-serif; }
+  [hidden] { display:none !important; }
+  main { max-width:760px; margin:0 auto; padding:20px 16px 48px; }
+  button, input { font:inherit; color:var(--fg); }
+  button { padding:8px 14px; border:1px solid var(--line); border-radius:8px; background:var(--panel); cursor:pointer; }
+  button.primary { background:var(--fg); color:var(--bg); border-color:var(--fg); font-weight:600; }
+  input { width:100%; padding:10px 12px; border:1px solid var(--line); border-radius:8px; background:var(--panel); }
+  :focus-visible { outline:3px solid #3b82f6; outline-offset:2px; }
+  #login { max-width:380px; margin-top:12vh; }
+  #login h1 { margin:0 0 4px; font-size:26px; }
+  #login label { display:block; margin:14px 0 4px; color:var(--muted); font-size:14px; }
+  #login button { width:100%; margin-top:18px; padding:11px; }
+  #err { color:var(--bad); min-height:1.5em; margin-top:10px; }
+  .bar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; justify-content:space-between; margin-bottom:14px; }
+  .bar h1 { margin:0; font-size:20px; }
+  .pills { display:flex; flex-wrap:wrap; gap:8px; }
+  .pill { padding:3px 10px; border:1px solid var(--line); border-radius:999px; font-size:14px; background:var(--panel); }
+  .pill.ok { color:var(--in); border-color:var(--in); } .pill.bad { color:var(--bad); border-color:var(--bad); }
+  .pill.warn { color:var(--warn); border-color:var(--warn); }
+  #hero { padding:30px 22px; border:2px solid var(--line); border-radius:12px; background:var(--panel);
+          font-size:28px; font-weight:700; line-height:1.25; min-height:120px; display:flex; align-items:center; }
+  #hero.checked_in { border-color:var(--in); color:var(--in); } #hero.checked_out { border-color:var(--out); color:var(--out); }
+  #hero.already_done { border-color:var(--done); color:var(--done); }
+  #hero.not_found, #hero.error { border-color:var(--bad); color:var(--bad); }
+  #hero.invalid, #hero.queued { border-color:var(--warn); color:var(--warn); }
+  .manual { display:flex; gap:8px; margin:14px 0; }
+  .tools { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:10px; }
+  h2 { font-size:15px; margin:18px 0 6px; color:var(--muted); font-weight:600; }
+  #log { list-style:none; margin:0; padding:0; border:1px solid var(--line); border-radius:8px; background:var(--panel); max-height:340px; overflow-y:auto; }
+  #log li { display:flex; gap:12px; padding:7px 12px; border-bottom:1px solid var(--line); }
+  #log li:last-child { border-bottom:0; }
+  #log time { color:var(--muted); white-space:nowrap; font-variant-numeric:tabular-nums; }
+</style>
+</head>
+<body>
+<main id="login" hidden>
+  <h1>Centerdash Scanner Check-in</h1>
+  <p style="color:var(--muted);margin:0">Sign in to start scanning</p>
+  <form id="form">
+    <label for="email">Email</label><input id="email" type="email" autocomplete="username" required>
+    <label for="pw">Password</label><input id="pw" type="password" autocomplete="current-password" required>
+    <button class="primary" type="submit">Log in</button>
+    <div id="err" role="alert"></div>
+  </form>
+</main>
+
+<main id="app" hidden>
+  <div class="bar">
+    <h1>Centerdash Scanner Check-in</h1>
+    <div class="pills">
+      <span id="p-scan" class="pill bad">No scanner</span>
+      <span id="p-net" class="pill ok">Online</span>
+      <span id="p-queue" class="pill warn" hidden></span>
+    </div>
+  </div>
+  <div id="hero" role="status" aria-live="polite">Waiting for scan…</div>
+  <form id="manual" class="manual">
+    <input id="code" inputmode="numeric" autocomplete="off" placeholder="Or type a code and press Enter" aria-label="Type a code">
+    <button type="submit">Check in</button>
+  </form>
+  <div class="tools">
+    <button id="add">Add scanner</button>
+    <button id="snd" aria-pressed="false">Sound: off</button>
+    <button id="out">Log out</button>
+  </div>
+  <h2>Recent scans</h2>
+  <ul id="log"></ul>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<script>
+// ---- ---------------------------------------------------------- ----
+const SUPABASE_URL = "SECRET_SUPABASE_URL";
+const SUPABASE_KEY = "SECRET_SUPABASE_KEY";
+const TZ = "America/Edmonton", BAUD = 9600, DEBOUNCE_MS = 3000; // hardcoded this for now, maybe change later
+// ---------------------------------------------------------------------
+
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+const $ = id => document.getElementById(id);
+const STAFF = /^S\d{5}$/, NET = /fetch|network|timeout|timed out|offline|load failed|connection|jwt/i;
+const S = { center: null, students: [], staff: [], last: { code: "", t: 0 }, q: [], busy: false, flushing: false,
+            ports: new Map(), sound: localStorage.getItem("sound") === "1" };
+
+const stamp = d => ({ day: d.toLocaleDateString("en-CA", { timeZone: TZ }),
+                      time: d.toLocaleTimeString("en-GB", { timeZone: TZ, hourCycle: "h23" }) });
+const isNet = e => !navigator.onLine || NET.test(e && e.message || "");
+async function q(p) {
+  const { data, error } = await p;
+  if (error) { if (/jwt/i.test(error.message)) sb.auth.refreshSession(); throw new Error(error.message); }
+  return data;
+}
+
+// ---- sign-in (the session is kept until Log out) ----
+const view = name => { $("login").hidden = name !== "login"; $("app").hidden = name !== "app"; };
+$("form").addEventListener("submit", async e => {
+  e.preventDefault();
+  const { data, error } = await sb.auth.signInWithPassword({ email: $("email").value.trim(), password: $("pw").value });
+  if (error || !data.session) { $("err").textContent = "Incorrect email or password."; $("pw").value = ""; return; }
+  start(data.user);
+});
+$("out").addEventListener("click", async () => { await sb.auth.signOut(); location.reload(); });
+
+async function start(user) {
+  try {
+    const rows = await q(sb.from("user_centers").select("center_id").eq("user_id", user.id));
+    if (!rows.length) { view("login"); $("err").textContent = "This account isn’t linked to a center. Contact your administrator."; return; }
+    S.center = rows[0].center_id;
+    await loadPeople();
+  } catch (e) {
+    view("login"); $("err").textContent = "Couldn’t reach the server. Check the internet connection and reload."; return;
+  }
+  view("app");
+  setupScanners(); updateNet(); updatePending(); keepAwake();
+  setInterval(() => loadPeople().catch(() => {}), 60000);
+  setInterval(() => { if (!S.busy) flush().catch(() => {}); }, 20000);
+  setInterval(connectGranted, 5000);
+  $("code").focus();
+}
+
+async function loadPeople() {
+  S.students = await q(sb.from("students").select("*").eq("center_id", S.center));
+  S.staff = await q(sb.from("staff").select("*").eq("center_id", S.center).eq("status", "active"));
+}
+
+// ---- check-in / check-out logic (same rules as the desktop app) ----
+async function toggle(kind, rec, when) {
+  const staff = kind === "staff", table = staff ? "staff_time_logs" : "attendance_logs";
+  const idCol = staff ? "staff_id" : "s_id", id = rec[idCol], { day, time } = stamp(when);
+  const name = rec.first_name || (staff ? rec.staff_code : rec.barcode_code);
+  const rows = await q(sb.from(table).select("*").eq("center_id", S.center).eq(idCol, id).eq("date", day));
+  const cur = rows[0]?.attendance || (staff ? "Not Clocked In" : "No Show");
+  const write = f => rows[0]
+    ? q(sb.from(table).update(f).eq("log_id", rows[0].log_id))
+    : q(sb.from(table).insert({ ...f, center_id: S.center, [idCol]: id, date: day }));
+  if (cur === "No Show" || cur === "Not Clocked In" || cur === "") {
+    await write({ attendance: "In", time_in: time });
+    return ["checked_in", staff ? `Staff clocked IN: ${name}` : `Checked IN: ${name}`];
+  }
+  if (cur === "In") {
+    await write({ attendance: "Out", time_out: time });
+    return ["checked_out", staff ? `Staff clocked OUT: ${name}` : `Checked OUT: ${name}`];
+  }
+  return ["already_done", `${name} already logged as ‘${cur}’`];
+}
+
+async function process(code, when) {
+  if (STAFF.test(code)) {
+    const s = S.staff.find(x => String(x.staff_code ?? "").trim() === code);
+    return s ? toggle("staff", s, when) : ["not_found", `Staff code ${code} not found.`];
+  }
+  const find = () => S.students.find(x => String(x.barcode_code ?? "").trim() === code);
+  let st = find();
+  if (!st) { await loadPeople(); st = find(); }      // maybe a brand-new student
+  return st ? toggle("student", st, when) : ["not_found", `Code ${code} not found in the student database.`];
+}
+
+// ---- scan queue: one at a time, in order ----
+function enqueue(raw) { S.q.push(raw); drain(); }
+async function drain() {
+  if (S.busy) return;
+  S.busy = true;
+  while (S.q.length) await handle(S.q.shift());
+  S.busy = false;
+}
+async function handle(raw) {
+  const code = raw.trim(), now = Date.now();
+  if (!code || (code === S.last.code && now - S.last.t < DEBOUNCE_MS)) return;
+  S.last = { code, t: now };
+  if (!STAFF.test(code) && !/^\d+$/.test(code)) return show("invalid", `Unrecognized scan format: ‘${code}’`);
+  await flush().catch(() => {});
+  try {
+    const [status, msg] = await process(code, new Date());
+    show(status, msg);
+  } catch (e) {
+    if (isNet(e)) { savePending(code); show("queued", `Offline. Saved scan ${code} to retry automatically.`); }
+    else { console.error(e); show("error", `Error processing scan: ${e.message}`); }
+  }
+}
+
+// ---- offline buffer (kept in this browser; replayed oldest first) ----
+const loadPending = () => { try { return JSON.parse(localStorage.getItem("pending") || "[]"); } catch { return []; } };
+const savePending = code => { const a = loadPending(); a.push({ code, at: new Date().toISOString(), center: S.center });
+                              localStorage.setItem("pending", JSON.stringify(a)); updatePending(); };
+async function flush() {
+  if (S.flushing) return;
+  S.flushing = true;
+  try {
+    const all = loadPending(), mine = all.filter(e => e.center === S.center);
+    if (!mine.length) return;
+    const others = all.filter(e => e.center !== S.center);
+    let done = 0;
+    for (const [i, e] of mine.entries()) {
+      try { await process(e.code, new Date(e.at)); done++; }
+      catch (err) {
+        if (isNet(err)) { localStorage.setItem("pending", JSON.stringify([...others, ...mine.slice(i)])); updatePending(); return; }
+        done++;                                      // a bad entry: drop it so the queue can’t jam
+      }
+    }
+    localStorage.setItem("pending", JSON.stringify(others));
+    updatePending();
+    show("checked_in", `Synced ${done} queued scan(s) that were waiting on a connection.`, true);
+  } finally { S.flushing = false; }
+}
+
+// ---- display ----
+function show(status, msg, quiet) {
+  if (!quiet) { $("hero").className = status; $("hero").textContent = msg; }
+  const li = document.createElement("li"), t = document.createElement("time"), m = document.createElement("span");
+  t.textContent = new Date().toLocaleTimeString("en-US", { timeZone: TZ }); m.textContent = msg;
+  li.append(t, m); $("log").prepend(li);
+  while ($("log").children.length > 200) $("log").lastChild.remove();
+  if (!quiet) chime(["not_found", "invalid", "error"].includes(status) ? "bad" : ["queued"].includes(status) ? "" : "good");
+}
+function updatePending() {
+  const n = loadPending().filter(e => e.center === S.center).length;
+  $("p-queue").hidden = !n; $("p-queue").textContent = `${n} queued (offline)`;
+}
+function updateNet() {
+  $("p-net").textContent = navigator.onLine ? "Online" : "Offline";
+  $("p-net").className = "pill " + (navigator.onLine ? "ok" : "bad");
+}
+addEventListener("online", () => { updateNet(); flush().catch(() => {}); });
+addEventListener("offline", updateNet);
+
+$("manual").addEventListener("submit", e => { e.preventDefault(); enqueue($("code").value); $("code").value = ""; });
+
+// ---- sound ----
+let ac;
+addEventListener("pointerdown", () => { ac ??= new AudioContext(); ac.resume(); }, { once: true });
+function chime(kind) {
+  if (!S.sound || !ac || !kind) return;
+  const notes = kind === "good" ? [[1047, 0, .16], [1568, .08, .28]] : [[330, 0, .18], [262, .12, .3]];
+  for (const [f, t, l] of notes) {
+    const o = ac.createOscillator(), g = ac.createGain(), at = ac.currentTime + t;
+    o.frequency.value = f; g.gain.setValueAtTime(.0001, at);
+    g.gain.exponentialRampToValueAtTime(.25, at + .01); g.gain.exponentialRampToValueAtTime(.0001, at + l);
+    o.connect(g).connect(ac.destination); o.start(at); o.stop(at + l + .02);
+  }
+}
+function paintSound() { $("snd").textContent = "Sound: " + (S.sound ? "on" : "off"); $("snd").setAttribute("aria-pressed", S.sound); }
+$("snd").addEventListener("click", () => { ac ??= new AudioContext(); S.sound = !S.sound;
+  localStorage.setItem("sound", S.sound ? "1" : "0"); paintSound(); chime("good"); });
+paintSound();
+
+// ---- keep the screen awake ----
+async function keepAwake() { try { await navigator.wakeLock.request("screen"); } catch {} }
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && !$("app").hidden) keepAwake(); });
+
+// ---- scanners (Web Serial) ----
+function paintScanners() {
+  const n = S.ports.size;
+  $("p-scan").textContent = n ? `${n} scanner${n > 1 ? "s" : ""} connected` : "No scanner";
+  $("p-scan").className = "pill " + (n ? "ok" : "bad");
+}
+async function openPort(p) {
+  if (S.ports.has(p)) return;
+  await p.open({ baudRate: BAUD });
+  S.ports.set(p, true); paintScanners();
+  const dec = new TextDecoder(); let buf = "", timer = null;
+  const flushBuf = () => { const c = buf.trim(); buf = ""; if (c) enqueue(c); };
+  try {
+    while (p.readable) {
+      const r = p.readable.getReader();
+      try {
+        for (;;) {
+          const { value, done } = await r.read();
+          if (done) break;
+          buf += dec.decode(value, { stream: true });
+          const parts = buf.split(/[\r\n]+/); buf = parts.pop();
+          parts.map(s => s.trim()).filter(Boolean).forEach(enqueue);
+          clearTimeout(timer); if (buf) timer = setTimeout(flushBuf, 150);   // scanners with no end-of-line character
+        }
+      } finally { r.releaseLock(); }
+      break;
+    }
+  } catch (e) { console.warn("Scanner read stopped:", e.message); }
+  S.ports.delete(p); paintScanners();
+  try { await p.close(); } catch {}
+}
+async function connectGranted() {
+  if (!("serial" in navigator)) return;
+  for (const p of await navigator.serial.getPorts()) if (!S.ports.has(p)) openPort(p).catch(() => {});
+}
+function setupScanners() {
+  if (!("serial" in navigator) || !window.isSecureContext) {
+    $("add").disabled = true;
+    show("error", "This browser can’t read the scanner here. Use Chrome and open this page from an https:// address.");
+    return;
+  }
+  $("add").addEventListener("click", async () => {
+    try { await openPort(await navigator.serial.requestPort()); }
+    catch (e) { if (e.name !== "NotFoundError") show("error", `Couldn’t open the scanner: ${e.message}`); }
+  });
+  navigator.serial.addEventListener("connect", connectGranted);
+  navigator.serial.addEventListener("disconnect", () => setTimeout(paintScanners, 300));
+  connectGranted();
+}
+
+// ---- start ----
+(async () => {
+  const { data: { session } } = await sb.auth.getSession();
+  if (session) start(session.user); else view("login");
+})();
+</script>
+</body>
+</html>
